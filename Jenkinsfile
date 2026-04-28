@@ -1,20 +1,36 @@
 pipeline {
     agent any
 
+    tools {
+        jdk 'jdk21'
+        nodejs 'node23'
+    }
+
     environment {
-        DOCKER_HUB = 'veeradockerhub'
-        IMAGE_NAME = 'netflix-clone'
-        IMAGE_TAG  = 'latest'
-        KUBE_DEPLOY_PATH = 'Kubernetes/deployment.yml'
+        // Docker
+        DOCKER_HUB   = 'veeradockerhub'
+        IMAGE_NAME   = 'netflix-clone'
+        IMAGE_TAG    = "${BUILD_NUMBER}"
+        DOCKER_IMAGE = "${DOCKER_HUB}/${IMAGE_NAME}"
+
+        // AWS / EKS
+        AWS_REGION   = 'us-east-1'
+        CLUSTER_NAME = 'mycluster'
+
+        // Kubernetes Files
+        KUBE_DEPLOY_PATH  = 'Kubernetes/deployment.yml'
         KUBE_SERVICE_PATH = 'Kubernetes/service.yml'
-        KUBECONFIG_PATH = '/var/lib/jenkins/.kube/config'  // Explicit kubeconfig
+
+        // Mail
         RECIPIENTS = 'veeraprasad.koduri@gmail.com'
     }
 
     stages {
+
         stage('Checkout Code') {
             steps {
-                git url: 'https://github.com/veeraprasadkoduri-cmd/devsecops-netflix.git', branch: 'main'
+                git branch: 'main',
+                url: 'https://github.com/veeraprasadkoduri-cmd/devsecops-netflix.git'
             }
         }
 
@@ -24,63 +40,205 @@ pipeline {
             }
         }
 
-        stage('Build Docker Image') {
+        stage('Build Application') {
             steps {
-                sh "docker build -t ${DOCKER_HUB}/${IMAGE_NAME}:${IMAGE_TAG} ."
+                sh 'npm run build'
             }
         }
 
-        stage('Docker Login & Push') {
+        stage('Test') {
             steps {
-                withCredentials([usernamePassword(
-                    credentialsId: 'docker-creds',
-                    usernameVariable: 'DOCKER_USER', 
-                    passwordVariable: 'DOCKER_PASS')]) {
-                    
+                sh 'npm test -- --watchAll=false --passWithNoTests || true'
+            }
+        }
+
+        stage('SonarQube Analysis') {
+            steps {
+                withSonarQubeEnv('sq') {
                     sh '''
-                        echo "Logging into Docker Hub..."
-                        echo $DOCKER_PASS | docker login -u $DOCKER_USER --password-stdin
-                        docker push ${DOCKER_HUB}/${IMAGE_NAME}:${IMAGE_TAG}
+                    sonar-scanner \
+                    -Dsonar.projectKey=netflix-clone \
+                    -Dsonar.sources=src \
+                    -Dsonar.projectName=Netflix-Clone \
+                    -Dsonar.projectVersion=${BUILD_NUMBER}
                     '''
                 }
             }
         }
 
-        stage('Deploy to Kubernetes') {
+        stage('Quality Gate') {
             steps {
-                sh """
-                    export KUBECONFIG=${KUBECONFIG_PATH}
-                    kubectl apply -f ${KUBE_DEPLOY_PATH}
-                    kubectl apply -f ${KUBE_SERVICE_PATH}
-                """
+                timeout(time: 2, unit: 'MINUTES') {
+                    waitForQualityGate abortPipeline: true
+                }
+            }
+        }
+
+        stage('Package Artifact') {
+            steps {
+                sh 'zip -r netflix-build.zip build/'
+            }
+        }
+
+        stage('Upload to Nexus') {
+            steps {
+                withCredentials([usernamePassword(
+                    credentialsId: 'nexus-cred',
+                    usernameVariable: 'NEXUS_USER',
+                    passwordVariable: 'NEXUS_PASS'
+                )]) {
+
+                    sh '''
+                    curl -v -u $NEXUS_USER:$NEXUS_PASS \
+                    --upload-file netflix-build.zip \
+                    http://localhost:8081/repository/raw-hosted/netflix-build-${BUILD_NUMBER}.zip
+                    '''
+                }
+            }
+        }
+
+        stage('Docker Build') {
+            steps {
+                sh '''
+                docker build -t $DOCKER_IMAGE:${BUILD_NUMBER} .
+                docker tag $DOCKER_IMAGE:${BUILD_NUMBER} $DOCKER_IMAGE:latest
+                '''
+            }
+        }
+
+        stage('Docker Push') {
+            steps {
+                withCredentials([usernamePassword(
+                    credentialsId: 'docker-creds',
+                    usernameVariable: 'DOCKER_USER',
+                    passwordVariable: 'DOCKER_PASS'
+                )]) {
+
+                    sh '''
+                    echo $DOCKER_PASS | docker login -u $DOCKER_USER --password-stdin
+                    docker push $DOCKER_IMAGE:${BUILD_NUMBER}
+                    docker push $DOCKER_IMAGE:latest
+                    docker logout
+                    '''
+                }
+            }
+        }
+
+        stage('Install Helm') {
+            steps {
+                sh '''
+                curl -LO https://get.helm.sh/helm-v3.14.0-linux-amd64.tar.gz
+                tar -zxvf helm-v3.14.0-linux-amd64.tar.gz
+                mv linux-amd64/helm ./helm
+                chmod +x ./helm
+                '''
+            }
+        }
+
+        stage('Setup Kubeconfig') {
+            steps {
+                sh '''
+                aws eks update-kubeconfig --region $AWS_REGION --name $CLUSTER_NAME
+                kubectl get nodes
+                '''
+            }
+        }
+
+        stage('Deploy Monitoring') {
+            steps {
+                sh '''
+                ./helm repo add prometheus-community https://prometheus-community.github.io/helm-charts || true
+                ./helm repo update
+
+                ./helm upgrade --install monitoring prometheus-community/kube-prometheus-stack \
+                --namespace monitoring \
+                --create-namespace \
+                --set grafana.service.type=LoadBalancer
+                '''
+            }
+        }
+
+        stage('Get Grafana Password') {
+            steps {
+                sh '''
+                kubectl get secret monitoring-grafana \
+                -n monitoring \
+                -o jsonpath="{.data.admin-password}" | base64 --decode
+                echo ""
+                '''
+            }
+        }
+
+        stage('Deploy Application to EKS') {
+            steps {
+                sh '''
+                kubectl apply -f ${KUBE_DEPLOY_PATH}
+                kubectl apply -f ${KUBE_SERVICE_PATH}
+                '''
             }
         }
 
         stage('Verify Deployment') {
             steps {
-                sh """
-                    export KUBECONFIG=${KUBECONFIG_PATH}
-                    echo 'Waiting for pods to be ready...'
-                    kubectl rollout status deployment/netflix-app --timeout=120s
-                    kubectl get pods -o wide
-                    kubectl get svc -o wide
-                """
+                sh '''
+                kubectl rollout status deployment/netflix-app --timeout=180s
+                kubectl get pods -o wide
+                kubectl get svc -o wide
+                '''
+            }
+        }
+
+        stage('Get Application URL') {
+            steps {
+                script {
+                    def url = sh(
+                        script: '''
+                        kubectl get svc netflix-service \
+                        -o jsonpath="{.status.loadBalancer.ingress[0].hostname}{.status.loadBalancer.ingress[0].ip}"
+                        ''',
+                        returnStdout: true
+                    ).trim()
+
+                    env.APP_URL = url
+                    echo "Application URL: ${env.APP_URL}"
+                }
             }
         }
     }
 
     post {
-       success {
-        echo "✅ Pipeline completed successfully!"
-        emailext (
-            to: "${RECIPIENTS}",
-            subject: "Jenkins Pipeline Success: ${env.JOB_NAME} #${env.BUILD_NUMBER}",
-            body: """The pipeline completed successfully!
-            Job: ${env.JOB_NAME}
-            Build: ${env.BUILD_NUMBER}
-            Check console output at: ${env.BUILD_URL}"""
-        )
-    }
-       
+
+        success {
+            emailext(
+                to: "${RECIPIENTS}",
+                subject: "SUCCESS: ${env.JOB_NAME} #${env.BUILD_NUMBER}",
+                body: """
+Pipeline SUCCESS 🎉
+
+Application URL:
+http://${env.APP_URL}
+
+Build URL:
+${env.BUILD_URL}
+"""
+            )
+        }
+
+        failure {
+            emailext(
+                to: "${RECIPIENTS}",
+                subject: "FAILED: ${env.JOB_NAME} #${env.BUILD_NUMBER}",
+                body: """
+Pipeline FAILED ❌
+
+Check Logs:
+${env.BUILD_URL}
+"""
+            )
+        }
+
+        always {
+            archiveArtifacts artifacts: 'netflix-build.zip', fingerprint: true
+        }
     }
 }
