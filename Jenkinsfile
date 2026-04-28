@@ -30,7 +30,7 @@ pipeline {
         stage('Checkout Code') {
             steps {
                 git branch: 'main',
-                url: 'https://github.com/veeraprasadkoduri-cmd/devsecops-netflix.git'
+                url: 'https://github.com/veeraprasadkoduri-cmd/Netflix-npm.git'
             }
         }
 
