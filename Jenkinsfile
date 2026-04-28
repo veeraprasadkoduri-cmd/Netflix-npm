@@ -159,6 +159,7 @@ pipeline {
         stage('Setup Kubeconfig') {
             steps {
                 sh '''
+                mkdir -p ~/.kube
                 aws eks update-kubeconfig --region $AWS_REGION --name $CLUSTER_NAME
                 kubectl get nodes
                 '''
@@ -204,8 +205,8 @@ pipeline {
             steps {
                 sh '''
                 kubectl rollout status deployment/netflix-app --timeout=180s
-                kubectl get pods
-                kubectl get svc
+                kubectl get pods -o wide
+                kubectl get svc -o wide
                 '''
             }
         }
@@ -233,15 +234,15 @@ pipeline {
         success {
             emailext(
                 to: "${RECIPIENTS}",
-                subject: "SUCCESS: ${JOB_NAME} #${BUILD_NUMBER}",
+                subject: "SUCCESS: ${env.JOB_NAME} #${env.BUILD_NUMBER}",
                 body: """
 Pipeline SUCCESS 🎉
 
 Application URL:
-http://${APP_URL}
+http://${env.APP_URL}
 
 Build Logs:
-${BUILD_URL}
+${env.BUILD_URL}
 """
             )
         }
@@ -249,12 +250,12 @@ ${BUILD_URL}
         failure {
             emailext(
                 to: "${RECIPIENTS}",
-                subject: "FAILED: ${JOB_NAME} #${BUILD_NUMBER}",
+                subject: "FAILED: ${env.JOB_NAME} #${env.BUILD_NUMBER}",
                 body: """
 Pipeline FAILED ❌
 
 Check Logs:
-${BUILD_URL}
+${env.BUILD_URL}
 """
             )
         }
