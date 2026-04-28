@@ -14,7 +14,7 @@ pipeline {
         DOCKER_IMAGE = "${DOCKER_HUB}/${IMAGE_NAME}"
 
         // AWS / EKS
-        AWS_REGION   = 'us-east-1'
+        AWS_REGION   = 'ap-south-1'
         CLUSTER_NAME = 'mycluster'
 
         // Kubernetes Files
@@ -49,7 +49,7 @@ pipeline {
         stage('Test') {
             steps {
                 sh '''
-                if npm run | grep -q "test"; then
+                if npm run | grep -q test; then
                     npm test -- --watchAll=false --passWithNoTests
                 else
                     echo "No test script found. Skipping tests."
@@ -67,9 +67,9 @@ pipeline {
                         sh """
                         ${scannerHome}/bin/sonar-scanner \
                         -Dsonar.projectKey=netflix-clone \
-                        -Dsonar.sources=src \
                         -Dsonar.projectName=Netflix-Clone \
-                        -Dsonar.projectVersion=${BUILD_NUMBER}
+                        -Dsonar.projectVersion=${BUILD_NUMBER} \
+                        -Dsonar.sources=src
                         """
                     }
                 }
@@ -87,10 +87,13 @@ pipeline {
         stage('Package Artifact') {
             steps {
                 sh '''
+                rm -f netflix-build.zip
+
                 if [ -d dist ]; then
-                    zip -r netflix-build.zip dist/
+                    zip -r netflix-build.zip dist
                 else
-                    zip -r netflix-build.zip build/
+                    echo "dist folder not found"
+                    exit 1
                 fi
                 '''
             }
@@ -103,7 +106,6 @@ pipeline {
                     usernameVariable: 'NEXUS_USER',
                     passwordVariable: 'NEXUS_PASS'
                 )]) {
-
                     sh '''
                     curl -u $NEXUS_USER:$NEXUS_PASS \
                     --upload-file netflix-build.zip \
@@ -129,7 +131,6 @@ pipeline {
                     usernameVariable: 'DOCKER_USER',
                     passwordVariable: 'DOCKER_PASS'
                 )]) {
-
                     sh '''
                     echo $DOCKER_PASS | docker login -u $DOCKER_USER --password-stdin
                     docker push $DOCKER_IMAGE:${BUILD_NUMBER}
@@ -145,10 +146,11 @@ pipeline {
                 sh '''
                 if ! command -v helm >/dev/null 2>&1; then
                     curl -LO https://get.helm.sh/helm-v3.14.0-linux-amd64.tar.gz
-                    tar -zxvf helm-v3.14.0-linux-amd64.tar.gz
+                    tar -xzf helm-v3.14.0-linux-amd64.tar.gz
                     sudo mv linux-amd64/helm /usr/local/bin/helm
                     chmod +x /usr/local/bin/helm
                 fi
+
                 helm version
                 '''
             }
@@ -183,6 +185,7 @@ pipeline {
                 kubectl get secret monitoring-grafana \
                 -n monitoring \
                 -o jsonpath="{.data.admin-password}" | base64 --decode
+
                 echo ""
                 '''
             }
@@ -201,8 +204,8 @@ pipeline {
             steps {
                 sh '''
                 kubectl rollout status deployment/netflix-app --timeout=180s
-                kubectl get pods -o wide
-                kubectl get svc -o wide
+                kubectl get pods
+                kubectl get svc
                 '''
             }
         }
@@ -210,7 +213,7 @@ pipeline {
         stage('Get Application URL') {
             steps {
                 script {
-                    def url = sh(
+                    def appUrl = sh(
                         script: '''
                         kubectl get svc netflix-service \
                         -o jsonpath="{.status.loadBalancer.ingress[0].hostname}"
@@ -218,7 +221,7 @@ pipeline {
                         returnStdout: true
                     ).trim()
 
-                    env.APP_URL = url
+                    env.APP_URL = appUrl
                     echo "Application URL: ${env.APP_URL}"
                 }
             }
@@ -230,15 +233,15 @@ pipeline {
         success {
             emailext(
                 to: "${RECIPIENTS}",
-                subject: "SUCCESS: ${env.JOB_NAME} #${env.BUILD_NUMBER}",
+                subject: "SUCCESS: ${JOB_NAME} #${BUILD_NUMBER}",
                 body: """
 Pipeline SUCCESS 🎉
 
 Application URL:
-http://${env.APP_URL}
+http://${APP_URL}
 
-Build URL:
-${env.BUILD_URL}
+Build Logs:
+${BUILD_URL}
 """
             )
         }
@@ -246,12 +249,12 @@ ${env.BUILD_URL}
         failure {
             emailext(
                 to: "${RECIPIENTS}",
-                subject: "FAILED: ${env.JOB_NAME} #${env.BUILD_NUMBER}",
+                subject: "FAILED: ${JOB_NAME} #${BUILD_NUMBER}",
                 body: """
 Pipeline FAILED ❌
 
 Check Logs:
-${env.BUILD_URL}
+${BUILD_URL}
 """
             )
         }
