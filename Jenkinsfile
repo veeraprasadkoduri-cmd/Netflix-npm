@@ -7,21 +7,17 @@ pipeline {
     }
 
     environment {
-        // Docker
         DOCKER_HUB   = 'veeradockerhub'
         IMAGE_NAME   = 'netflix-clone'
         IMAGE_TAG    = "${BUILD_NUMBER}"
         DOCKER_IMAGE = "${DOCKER_HUB}/${IMAGE_NAME}"
 
-        // AWS / EKS
         AWS_REGION   = 'ap-south-1'
         CLUSTER_NAME = 'mycluster'
 
-        // Kubernetes Files
         KUBE_DEPLOY_PATH  = 'Kubernetes/deployment.yml'
         KUBE_SERVICE_PATH = 'Kubernetes/service.yml'
 
-        // Email
         RECIPIENTS = 'veeraprasad.koduri@gmail.com'
     }
 
@@ -150,8 +146,7 @@ pipeline {
                 if ! command -v helm >/dev/null 2>&1; then
                     curl -LO https://get.helm.sh/helm-v3.14.0-linux-amd64.tar.gz
                     tar -xzf helm-v3.14.0-linux-amd64.tar.gz
-                    mv linux-amd64/helm /usr/local/bin/helm
-                    chmod +x /usr/local/bin/helm
+                    sudo mv linux-amd64/helm /usr/local/bin/helm
                 fi
 
                 helm version
@@ -183,18 +178,6 @@ pipeline {
             }
         }
 
-        stage('Get Grafana Password') {
-            steps {
-                sh '''
-                kubectl get secret monitoring-grafana \
-                -n monitoring \
-                -o jsonpath="{.data.admin-password}" | base64 --decode
-
-                echo ""
-                '''
-            }
-        }
-
         stage('Deploy Application to EKS') {
             steps {
                 sh '''
@@ -219,8 +202,8 @@ pipeline {
                 script {
                     def appUrl = sh(
                         script: '''
-                        kubectl get svc netflix-service \
-                        -o jsonpath="{.status.loadBalancer.ingress[0].hostname}"
+                        kubectl get svc netflix-app \
+                        -o jsonpath="{.status.loadBalancer.ingress[0].hostname}" 2>/dev/null || echo ""
                         ''',
                         returnStdout: true
                     ).trim()
