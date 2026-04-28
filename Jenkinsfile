@@ -48,27 +48,37 @@ pipeline {
 
         stage('Test') {
             steps {
-                sh 'npm test -- --watchAll=false --passWithNoTests || true'
+                sh '''
+                if npm run | grep -q "test"; then
+                    npm test -- --watchAll=false --passWithNoTests
+                else
+                    echo "No test script found. Skipping tests."
+                fi
+                '''
             }
         }
 
         stage('SonarQube Analysis') {
             steps {
-                withSonarQubeEnv('sq') {
-                    sh '''
-                    sonar-scanner \
-                    -Dsonar.projectKey=netflix-clone \
-                    -Dsonar.sources=src \
-                    -Dsonar.projectName=Netflix-Clone \
-                    -Dsonar.projectVersion=${BUILD_NUMBER}
-                    '''
+                script {
+                    def scannerHome = tool 'sonar-scanner'
+
+                    withSonarQubeEnv('sq') {
+                        sh """
+                        ${scannerHome}/bin/sonar-scanner \
+                        -Dsonar.projectKey=netflix-clone \
+                        -Dsonar.sources=src \
+                        -Dsonar.projectName=Netflix-Clone \
+                        -Dsonar.projectVersion=${BUILD_NUMBER}
+                        """
+                    }
                 }
             }
         }
 
         stage('Quality Gate') {
             steps {
-                timeout(time: 2, unit: 'MINUTES') {
+                timeout(time: 5, unit: 'MINUTES') {
                     waitForQualityGate abortPipeline: true
                 }
             }
@@ -76,7 +86,13 @@ pipeline {
 
         stage('Package Artifact') {
             steps {
-                sh 'zip -r netflix-build.zip build/'
+                sh '''
+                if [ -d dist ]; then
+                    zip -r netflix-build.zip dist/
+                else
+                    zip -r netflix-build.zip build/
+                fi
+                '''
             }
         }
 
@@ -89,7 +105,7 @@ pipeline {
                 )]) {
 
                     sh '''
-                    curl -v -u $NEXUS_USER:$NEXUS_PASS \
+                    curl -u $NEXUS_USER:$NEXUS_PASS \
                     --upload-file netflix-build.zip \
                     http://localhost:8081/repository/raw-hosted/netflix-build-${BUILD_NUMBER}.zip
                     '''
@@ -127,10 +143,13 @@ pipeline {
         stage('Install Helm') {
             steps {
                 sh '''
-                curl -LO https://get.helm.sh/helm-v3.14.0-linux-amd64.tar.gz
-                tar -zxvf helm-v3.14.0-linux-amd64.tar.gz
-                mv linux-amd64/helm ./helm
-                chmod +x ./helm
+                if ! command -v helm >/dev/null 2>&1; then
+                    curl -LO https://get.helm.sh/helm-v3.14.0-linux-amd64.tar.gz
+                    tar -zxvf helm-v3.14.0-linux-amd64.tar.gz
+                    sudo mv linux-amd64/helm /usr/local/bin/helm
+                    chmod +x /usr/local/bin/helm
+                fi
+                helm version
                 '''
             }
         }
@@ -147,10 +166,10 @@ pipeline {
         stage('Deploy Monitoring') {
             steps {
                 sh '''
-                ./helm repo add prometheus-community https://prometheus-community.github.io/helm-charts || true
-                ./helm repo update
+                helm repo add prometheus-community https://prometheus-community.github.io/helm-charts || true
+                helm repo update
 
-                ./helm upgrade --install monitoring prometheus-community/kube-prometheus-stack \
+                helm upgrade --install monitoring prometheus-community/kube-prometheus-stack \
                 --namespace monitoring \
                 --create-namespace \
                 --set grafana.service.type=LoadBalancer
@@ -194,7 +213,7 @@ pipeline {
                     def url = sh(
                         script: '''
                         kubectl get svc netflix-service \
-                        -o jsonpath="{.status.loadBalancer.ingress[0].hostname}{.status.loadBalancer.ingress[0].ip}"
+                        -o jsonpath="{.status.loadBalancer.ingress[0].hostname}"
                         ''',
                         returnStdout: true
                     ).trim()
