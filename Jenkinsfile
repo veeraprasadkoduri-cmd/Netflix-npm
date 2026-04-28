@@ -49,7 +49,7 @@ pipeline {
         stage('Test') {
             steps {
                 sh '''
-                if npm run | grep -q "test"; then
+                if npm run | grep -q test; then
                     npm test -- --watchAll=false --passWithNoTests || true
                 else
                     echo "No test script found. Skipping tests."
@@ -150,7 +150,7 @@ pipeline {
                 if ! command -v helm >/dev/null 2>&1; then
                     curl -LO https://get.helm.sh/helm-v3.14.0-linux-amd64.tar.gz
                     tar -xzf helm-v3.14.0-linux-amd64.tar.gz
-                    sudo mv linux-amd64/helm /usr/local/bin/helm
+                    mv linux-amd64/helm /usr/local/bin/helm
                     chmod +x /usr/local/bin/helm
                 fi
 
